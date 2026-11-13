@@ -23,6 +23,8 @@ class SoftMCPlatform {
   std::string sim = getenv("SMC_SIM_CMD") ? getenv("SMC_SIM_CMD") : "vvp -n tb_sim.vvp";
   std::string hc_first = getenv("SMC_HC_FIRST") ? getenv("SMC_HC_FIRST") : "1500";
   int  runs = 0;
+  int  violations = 0;        // timing/protocol violations reported by the last run
+  std::string last_done;      // last SIM_DONE line
   int  init() { return SOFTMC_SUCCESS; }
   void reset_fpga() {}
   void set_aref(bool) {}      // sim model has no auto-refresh unless the program issues REF
@@ -34,12 +36,17 @@ class SoftMCPlatform {
     for (int i = 0; i < n; i++) fprintf(f, "%016llx\n", (unsigned long long)iseq[i]);
     fclose(f);
     free(iseq);
-    std::string cmd = sim + " +PROG=program.hex +OUT=readout.hex +HC_FIRST=" +
-                      hc_first + " > sim_run.log 2>&1";
+    std::string cmd = sim + " +PROG=program.hex +OUT=readout.hex +HC_FIRST=" + hc_first;
+    if (getenv("SMC_FAULTS")) cmd += std::string(" +FAULTS=") + getenv("SMC_FAULTS");  // planted faults file
+    cmd += " > sim_run.log 2>&1";
     if (system(cmd.c_str()) != 0) { std::cerr << "simulation failed, see sim_run.log\n"; exit(1); }
     std::ifstream log("sim_run.log"); std::string line;
-    while (std::getline(log, line)) if (line.rfind("SIM_DONE", 0) == 0)
-      std::cerr << "[sim run " << runs << ", " << n << " insts] " << line << "\n";
+    while (std::getline(log, line))
+      if (line.rfind("SIM_DONE", 0) == 0 || line.rfind("FAULTS", 0) == 0 || line.find("TIMING") != std::string::npos) {
+        if (line.rfind("SIM_DONE", 0) == 0) { last_done = line; violations = 0;
+          size_t p = line.find("violations="); if (p != std::string::npos) violations = atoi(line.c_str() + p + 11); }
+        if (!getenv("SMC_QUIET")) std::cerr << "[sim run " << runs << ", " << n << " insts] " << line << "\n";
+      }
     runs++;
     rx.clear(); rx_pos = 0;
     std::ifstream in("readout.hex");

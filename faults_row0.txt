@@ -1,0 +1,15 @@
+# Planted faults sized for marchc_gen (bank 0, row 0, bursts 0..7 = cols 0..56)
+# col = DRAM Bender column address (burst * 8), bit = 0..511 within the burst
+#
+# kind  bank row col bit
+SA0     0    0   8   5      # stuck-at-0
+SA1     0    0   16  100    # stuck-at-1
+TFD     0    0   24  7      # down-transition: cell cannot go 1 -> 0
+TFU     0    0   32  300    # up-transition:   cell cannot go 0 -> 1
+#
+# kind  dir  [val] aggressor(bank row col bit)  victim(bank row col bit)
+CFID    up   1     0 0 0 9      0 0 48 9        # aggressor 0->1 forces victim to 1 (aggressor below victim)
+CFID    down 0     0 0 56 3     0 0 40 3        # aggressor 1->0 forces victim to 0 (aggressor above victim)
+CFIN    up         0 0 0 11     0 0 24 11       # aggressor 0->1 inverts victim
+CFID    up   0     0 0 8 20     0 0 32 20       # aggressor 0->1 forces victim to 0 (escapes MATS+ and MATS++)
+# (no AF here: marchc_gen tests a single row)

@@ -1,7 +1,12 @@
 
 # DRAM Bender RTL sim harness (no FPGA needed)
-# Usage: make run               (Icarus, 4-state, slow)
-#        make run-verilator     (Verilator, 2-state, faster)
+# Usage: make run                 rowhammer case study (Icarus, 4-state, slow)
+#        make run-verilator       rowhammer case study (Verilator, ~90x faster)
+#        make march TEST=marchc-  reference march runner on a clean fake RAM
+#        make march-faults        reference runner with faults_example.txt planted
+#        make ladder              MATS+ vs MATS++ vs March C- per planted fault
+#        make marchc-faults       marchc_gen's March C- graded against faults_row0.txt
+#        make marchc-each         same, one planted fault at a time
 
 DRAM_BENDER ?= ./DRAM-Bender
 HDL  = $(DRAM_BENDER)/sources/hdl
@@ -20,6 +25,8 @@ INC  = -I$(HDL)/header_verilog -I$(DRAM_BENDER)/projects/U200/verilog
 
 ROWS ?= 3
 HC_FIRST ?= 1500
+TEST ?= marchc-
+FAULTS ?= faults_example.txt
 
 # Compile original simulation and March C- components
 all: tb_sim.vvp run_cs1 marchc_gen tb_sim_march.vvp
@@ -61,8 +68,33 @@ run-verilator: vobj/Vtb_sim run_cs1
 	SMC_SIM_CMD=./vobj/Vtb_sim SMC_HC_FIRST=$(HC_FIRST) ./run_cs1 $(ROWS) && cat cs1_results.txt
 
 # ============================================================
+# Planted faults + march tests
+# ============================================================
+
+march_bin: march.cpp sim_shim/platform.h
+	g++ -std=c++17 -O1 -w -o march -I sim_shim -I $(API) -I $(CS1) march.cpp $(API)/prog.cpp $(API)/instruction.cpp
+
+march: vobj/Vtb_sim march_bin
+	SMC_SIM_CMD=./vobj/Vtb_sim SMC_QUIET=1 ./march $(TEST)
+
+march-faults: vobj/Vtb_sim march_bin
+	SMC_SIM_CMD=./vobj/Vtb_sim SMC_QUIET=1 SMC_FAULTS=$(FAULTS) ./march $(TEST)
+
+ladder: vobj/Vtb_sim march_bin
+	./ladder.sh $(FAULTS)
+
+marchc-faults: vobj/Vtb_sim marchc_gen
+	./run_march_faults.sh faults_row0.txt 8 verilator
+
+marchc-each: vobj/Vtb_sim marchc_gen
+	./run_march_faults.sh faults_row0.txt 8 verilator --each
+
+# ============================================================
 # Cleanup
 # ============================================================
 
 clean:
-	rm -rf tb_sim.vvp run_cs1 vobj vbuild.log program.hex readout.hex sim_run.log cs1_results.txt marchc_gen tb_sim_march.vvp
+	rm -rf tb_sim.vvp run_cs1 vobj vbuild.log program.hex readout.hex sim_run.log cs1_results.txt marchc_gen tb_sim_march.vvp \
+	  march march_mismatches.csv readout_march.hex sim_march.log sim_march_faults.log trace_march.txt march_trace_mismatches.csv trace_mismatches.csv
+
+.PHONY: all run run-verilator march march-faults ladder marchc-faults marchc-each clean

@@ -1,0 +1,17 @@
+# Planted faults for the fake RAM (bank 1, rows 0-9 are the default march range)
+# col = DRAM Bender column address (0..1016, step 8), bit = 0..511 within the burst
+#
+# kind  bank row col bit
+SA0     1    2   64  5      # stuck-at-0
+SA1     1    3   128 100    # stuck-at-1
+TFD     1    4   200 7      # down-transition: cell cannot go 1 -> 0
+TFU     1    5   16  300    # up-transition:   cell cannot go 0 -> 1
+#
+# kind  dir  [val] aggressor(bank row col bit)  victim(bank row col bit)
+CFID    up   1     1 1 40 9     1 6 40 9        # aggressor 0->1 forces victim to 1 (aggressor below victim)
+CFID    down 0     1 7 80 3     1 2 80 3        # aggressor 1->0 forces victim to 0 (aggressor above victim)
+CFIN    up         1 0 8 11     1 3 512 11      # aggressor 0->1 inverts victim
+CFID    up   0     1 0 256 20   1 5 256 20      # aggressor 0->1 forces victim to 0 (escapes MATS+ and MATS++)
+#
+# kind  bank from_row to_row
+AF      1    8    9             # accesses to row 8 land in row 9
