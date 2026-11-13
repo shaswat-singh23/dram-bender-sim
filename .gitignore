@@ -15,3 +15,9 @@ run_output.txt
 /readout_march.hex
 /sim_march.log
 /program.hex
+/march
+march_mismatches.csv
+march_trace_mismatches.csv
+trace_mismatches.csv
+trace_march.txt
+sim_march_faults.log

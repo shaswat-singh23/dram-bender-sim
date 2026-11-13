@@ -80,8 +80,128 @@ module tb_sim;
     end
   endtask
 
+  // ---------------- planted classic memory faults (+FAULTS=<file>) ----------------
+  // One fault per line ('#' = comment). col is a DRAM Bender column address (0..1016, step 8),
+  // bit is 0..511 within that 64-byte burst.
+  //   SA0  bank row col bit           stuck-at-0
+  //   SA1  bank row col bit           stuck-at-1
+  //   TFD  bank row col bit           down-transition fault: cell cannot go 1 -> 0
+  //   TFU  bank row col bit           up-transition fault:   cell cannot go 0 -> 1
+  //   CFID up|down val  ab ar ac abit  vb vr vc vbit   idempotent coupling: aggressor transition forces victim to val
+  //   CFIN up|down      ab ar ac abit  vb vr vc vbit   inversion coupling: aggressor transition inverts victim
+  //   AF   bank from_row to_row       address-decoder fault: RD/WR to from_row land in to_row
+  localparam MAXF = 64;
+  localparam F_SA0=1, F_SA1=2, F_TFD=3, F_TFU=4, F_CFID=5, F_CFIN=6, F_AF=7;
+  integer f_type[0:MAXF-1], f_up[0:MAXF-1], f_val[0:MAXF-1];
+  integer f_b[0:MAXF-1], f_r[0:MAXF-1], f_c[0:MAXF-1], f_bit[0:MAXF-1];      // victim / target cell
+  integer a_b[0:MAXF-1], a_r[0:MAXF-1], a_c[0:MAXF-1], a_bit[0:MAXF-1];      // aggressor cell
+  integer n_faults, n_cf_fired;
+  string  fault_file;
+  // optional op trace (+TRACE=<file>): one line per RD/WR as seen by the program
+  //   W bank row col <512-bit intended data, hex>     R bank row col <512-bit returned data, hex>
+  // (row/col are the addresses the program used, before any address-decoder fault)
+  integer fd_trace;
+  string  trace_file;
+
+  task automatic load_faults();
+    integer fd, n; string kind, dir;
+`ifdef VERILATOR
+    string line;                 // (Verilator build) sscanf on a reg stops at leading NULs
+`else
+    reg [8*256-1:0] line;        // (Icarus build) fgets needs a reg
+`endif
+    integer x0, x1, x2, x3, x4, x5, x6, x7, x8;
+    n_faults = 0; fd = 0;
+    if ($value$plusargs("FAULTS=%s", fault_file)) begin
+    fd = $fopen(fault_file, "r");
+    if (fd == 0) $display("FAULTS: cannot open %s", fault_file);
+    end
+    if (fd != 0) begin
+    while (!$feof(fd) && n_faults < MAXF) begin
+`ifdef VERILATOR
+      line = "";
+`else
+      line = 0;
+`endif
+      n = $fgets(line, fd);
+      kind = "";
+      if (n > 0) n = $sscanf(line, "%s", kind);
+      if (n > 0 && kind.len() > 0 && kind.substr(0,0) != "#") begin   // skip blank lines and '#' comments
+      f_type[n_faults] = 0;
+      if (kind == "SA0" || kind == "SA1" || kind == "TFD" || kind == "TFU") begin
+        if ($sscanf(line, "%s %d %d %d %d", kind, x0, x1, x2, x3) == 5) begin
+          f_type[n_faults] = (kind == "SA0") ? F_SA0 : (kind == "SA1") ? F_SA1 : (kind == "TFD") ? F_TFD : F_TFU;
+          f_b[n_faults] = x0; f_r[n_faults] = x1; f_c[n_faults] = x2 >> 3; f_bit[n_faults] = x3;
+        end
+      end else if (kind == "CFID") begin
+        if ($sscanf(line, "%s %s %d %d %d %d %d %d %d %d %d", kind, dir, x8, x0, x1, x2, x3, x4, x5, x6, x7) == 11) begin
+          f_type[n_faults] = F_CFID; f_up[n_faults] = (dir == "up"); f_val[n_faults] = x8;
+          a_b[n_faults] = x0; a_r[n_faults] = x1; a_c[n_faults] = x2 >> 3; a_bit[n_faults] = x3;
+          f_b[n_faults] = x4; f_r[n_faults] = x5; f_c[n_faults] = x6 >> 3; f_bit[n_faults] = x7;
+        end
+      end else if (kind == "CFIN") begin
+        if ($sscanf(line, "%s %s %d %d %d %d %d %d %d %d", kind, dir, x0, x1, x2, x3, x4, x5, x6, x7) == 10) begin
+          f_type[n_faults] = F_CFIN; f_up[n_faults] = (dir == "up");
+          a_b[n_faults] = x0; a_r[n_faults] = x1; a_c[n_faults] = x2 >> 3; a_bit[n_faults] = x3;
+          f_b[n_faults] = x4; f_r[n_faults] = x5; f_c[n_faults] = x6 >> 3; f_bit[n_faults] = x7;
+        end
+      end else if (kind == "AF") begin
+        if ($sscanf(line, "%s %d %d %d", kind, x0, x1, x2) == 4) begin
+          f_type[n_faults] = F_AF; f_b[n_faults] = x0; f_r[n_faults] = x1; f_val[n_faults] = x2;
+        end
+      end
+      if (f_type[n_faults] != 0) n_faults++;
+      else $display("FAULTS: skipped malformed line: %s", line);
+      end
+    end
+    $fclose(fd);
+    $display("FAULTS: loaded %0d from %s", n_faults, fault_file);
+    end
+  endtask
+
+  // address-decoder fault: which physical row an access to (b, r) really reaches
+  function automatic integer phys_row(input integer b, input integer r);
+    integer k; phys_row = r;
+    for (k = 0; k < n_faults; k++)
+      if (f_type[k] == F_AF && f_b[k] == b && f_r[k] == r) phys_row = f_val[k];
+  endfunction
+
+  // enforce stuck-at cells of one burst
+  function automatic [511:0] apply_sa(input integer b, input integer r, input integer c, input [511:0] d);
+    integer k; apply_sa = d;
+    for (k = 0; k < n_faults; k++)
+      if (f_b[k] == b && f_r[k] == r && f_c[k] == c) begin
+        if (f_type[k] == F_SA0) apply_sa[f_bit[k]] = 1'b0;
+        if (f_type[k] == F_SA1) apply_sa[f_bit[k]] = 1'b1;
+      end
+  endfunction
+
+  task automatic fault_write(input integer b, input integer r, input integer c, input [511:0] wdata);
+    reg [511:0] oldv, newv; integer k, vi;
+    oldv = mem[idx_mem(b,r,c)];
+    newv = wdata;
+    for (k = 0; k < n_faults; k++)
+      if (f_b[k] == b && f_r[k] == r && f_c[k] == c) begin
+        if (f_type[k] == F_TFD && oldv[f_bit[k]] === 1'b1 && newv[f_bit[k]] === 1'b0) newv[f_bit[k]] = 1'b1;
+        if (f_type[k] == F_TFU && oldv[f_bit[k]] === 1'b0 && newv[f_bit[k]] === 1'b1) newv[f_bit[k]] = 1'b0;
+      end
+    newv = apply_sa(b, r, c, newv);
+    mem[idx_mem(b,r,c)] = newv;
+    // coupling faults triggered by a transition in this burst
+    for (k = 0; k < n_faults; k++)
+      if ((f_type[k] == F_CFID || f_type[k] == F_CFIN) && a_b[k] == b && a_r[k] == r && a_c[k] == c &&
+          ((f_up[k]  && oldv[a_bit[k]] === 1'b0 && newv[a_bit[k]] === 1'b1) ||
+           (!f_up[k] && oldv[a_bit[k]] === 1'b1 && newv[a_bit[k]] === 1'b0))) begin
+        vi = idx_mem(f_b[k], f_r[k], f_c[k]);
+        if (f_type[k] == F_CFID) mem[vi][f_bit[k]] = f_val[k][0];
+        else                     mem[vi][f_bit[k]] = ~mem[vi][f_bit[k]];
+        mem[vi] = apply_sa(f_b[k], f_r[k], f_c[k], mem[vi]);
+        n_cf_fired++;
+      end
+  endtask
+
   task automatic do_cmd(input integer s);
-    integer b, r, c, i; longint t;
+    integer b, r, c, i, pr; longint t; reg [511:0] rd;
     t = cyc*4 + s;
     b = {ddr_bg[s*`BG_WIDTH +: `BG_WIDTH], ddr_bank[s*`BANK_WIDTH +: `BANK_WIDTH]};
     r = ddr_row[s*`ROW_WIDTH +: `ROW_WIDTH];
@@ -103,9 +223,14 @@ module tb_sim;
       if (open_row[b] == -1) begin $display("[%0t] PROTOCOL: RD/WR to closed bank %0d", $time, b); n_viol++; end
       else if (t - t_act[b] < T_RCD) begin $display("[%0t] TIMING: tRCD violated bank %0d (%0d < %0d)", $time, b, t-t_act[b], T_RCD); n_viol++; end
       if (open_row[b] >= 0 && open_row[b] < NROW_MODEL) begin
-        if (ddr_write[s]) begin mem[idx_mem(b,open_row[b],c)] = ddr_wdata; n_wr++; end
-        else begin
-          for (i = 0; i < 16; i++) $fwrite(fd_out, "%08h\n", mem[idx_mem(b,open_row[b],c)][32*i +: 32]);
+        pr = phys_row(b, open_row[b]);
+        if (ddr_write[s]) begin
+          fault_write(b, pr, c, ddr_wdata); n_wr++;
+          if (fd_trace != 0) $fwrite(fd_trace, "W %0d %0d %0d %0128h\n", b, open_row[b], c*8, ddr_wdata);
+        end else begin
+          rd = apply_sa(b, pr, c, mem[idx_mem(b,pr,c)]);
+          for (i = 0; i < 16; i++) $fwrite(fd_out, "%08h\n", rd[32*i +: 32]);
+          if (fd_trace != 0) $fwrite(fd_trace, "R %0d %0d %0d %0128h\n", b, open_row[b], c*8, rd);
           n_rd++;
         end
       end
@@ -122,8 +247,11 @@ module tb_sim;
     $readmemh(prog_file, imem);
     for (i = 0; i < 16*NROW_MODEL; i++) disturb[i] = 0;
     for (i = 0; i < 16; i++) begin open_row[i] = -1; t_act[i] = -1000; t_pre[i] = -1000; end
-    n_act = 0; n_rd = 0; n_wr = 0; n_viol = 0; n_flips = 0; cyc = 0;
+    n_act = 0; n_rd = 0; n_wr = 0; n_viol = 0; n_flips = 0; cyc = 0; n_cf_fired = 0;
+    load_faults();
     fd_out = $fopen(out_file, "w");
+    fd_trace = 0;
+    if ($value$plusargs("TRACE=%s", trace_file)) fd_trace = $fopen(trace_file, "w");
     #60 rst = 0;
   end
 
@@ -131,9 +259,9 @@ module tb_sim;
     for (s = 0; s < 4; s++) do_cmd(s);
     cyc++;
     if (softmc_end || cyc > 5_000_000) begin
-      $display("SIM_DONE cycles=%0d ACT=%0d WR=%0d RD=%0d violations=%0d injected_flips=%0d%s",
-               cyc, n_act, n_wr, n_rd, n_viol, n_flips, softmc_end ? "" : " (TIMEOUT)");
-      $fclose(fd_out); $finish;
+      $display("SIM_DONE cycles=%0d ACT=%0d WR=%0d RD=%0d violations=%0d injected_flips=%0d faults=%0d cf_fired=%0d%s",
+               cyc, n_act, n_wr, n_rd, n_viol, n_flips, n_faults, n_cf_fired, softmc_end ? "" : " (TIMEOUT)");
+      $fclose(fd_out); if (fd_trace != 0) $fclose(fd_trace); $finish;
     end
   end
 endmodule
