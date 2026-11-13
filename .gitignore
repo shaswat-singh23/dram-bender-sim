@@ -10,3 +10,8 @@ sim_run.log
 vbuild.log
 cs1_results.txt
 run_output.txt
+/marchc_gen
+/tb_sim_march.vvp
+/readout_march.hex
+/sim_march.log
+/program.hex
